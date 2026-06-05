@@ -17,7 +17,7 @@ it calls `https://api.search.brave.com/res/v1` directly with the Python standard
 uv sync                                     # see explanation below
 uv run pytest                               # optional
 uv run llm plugins                          # shall show llm-tool-brave
-uv run llm tools list | grep -i '^ +brave'
+uv run llm tools list | grep -E '^ +brave'
 ```
 
 `uv sync` installs this package into `.venv` because `[tool.uv] package = true`.
@@ -108,6 +108,8 @@ llm -T Brave --td 'Use brave context, restricted to docs.python.org and peps.pyt
 | `include_sites`, `exclude_sites`, `goggles` | `goggles` | none | inline brave Goggles rules |
 | `lat`, `long`, `city`, `state`, `loc_country`, `postal_code` | location headers | none | location hints |
 
+Additional params: `country` (`US`), `search_lang` (`en`), `count` (`20`, `1-50`), `spellcheck` (`true`), `enable_local` (none).
+
 Each call is bounded by `max_tokens` before returning to `llm`. Multiple searches
 consume multiple tool responses plus JSON/source metadata. Invalid documented brave
 ranges are rejected before the API request.
@@ -159,7 +161,7 @@ Release:
 git add pyproject.toml
 git commit -m "Release 0.1.0"
 git tag -a 0.1.0 -m "Release 0.1.0"
-git push origin main
+git push origin master
 git push origin 0.1.0
 ```
 

@@ -7,7 +7,7 @@ import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Iterable, Literal, Optional
+from typing import Any, Callable, Iterable, Literal, Optional
 
 import llm
 
@@ -116,14 +116,7 @@ class BraveError(Exception):
 
 
 def _split_csv(value: Optional[str]) -> list[str]:
-    if not value:
-        return []
-    parts: list[str] = []
-    for chunk in value.replace("\n", ",").split(","):
-        item = chunk.strip()
-        if item:
-            parts.append(item)
-    return parts
+    return [item.strip() for item in re.split(r"[,\n]", value or "") if item.strip()]
 
 
 def _clean_params(params: dict[str, Any]) -> dict[str, Any]:
@@ -139,15 +132,7 @@ def _query_params(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _decode_response(response: Any, raw: bytes) -> str:
-    content_encoding = ""
-    try:
-        content_encoding = response.headers.get("Content-Encoding", "")
-    except AttributeError:
-        try:
-            content_encoding = response.getheader("Content-Encoding", "")
-        except AttributeError:
-            content_encoding = ""
-    if content_encoding.lower() == "gzip":
+    if response.headers.get("Content-Encoding", "").lower() == "gzip":
         raw = gzip.decompress(raw)
     return raw.decode("utf-8", errors="replace")
 
@@ -324,7 +309,7 @@ class Brave(llm.Toolbox):
             tools: Comma-separated tools to expose. Defaults to context only. Use
                 "all" for every method, or e.g. "context,web,news".
             api_key: brave Search API key or an llm key alias. If omitted, this
-                reads llm keys named brave, brave-search, or bx, then
+                reads llm keys named brave or brave-search, then
                 BRAVE_SEARCH_API_KEY.
             timeout: HTTP timeout in seconds.
             base_url: Base URL for tests or compatible gateways.
@@ -346,6 +331,8 @@ class Brave(llm.Toolbox):
         self.base_url = base_url.rstrip("/")
 
     def tools(self) -> Iterable[llm.Tool]:
+        # Overridden vs. llm.Toolbox.tools() to (a) filter by self._enabled_tools and
+        # (b) use a lowercase "brave_" prefix instead of the default "Brave_".
         for name in dir(self):
             if name.startswith("_") or name in self._blocked:
                 continue
@@ -354,6 +341,8 @@ class Brave(llm.Toolbox):
                 tool = llm.Tool.function(attr, name=f"brave_{name}")
                 tool.plugin = getattr(self, "plugin", None)
                 yield tool
+        # Preserve the base class extension point for add_tool().
+        yield from self._extra_tools
 
     @classmethod
     def method_tools(cls) -> list[llm.Tool]:
@@ -368,7 +357,7 @@ class Brave(llm.Toolbox):
 
     def _api_key(self) -> str:
         # Try the most common llm key aliases first, then the documented env var.
-        for alias in ("brave", "brave-search", "bx"):
+        for alias in ("brave", "brave-search"):
             key = llm.get_key(input=self._explicit_api_key, alias=alias, env="BRAVE_SEARCH_API_KEY")
             if key:
                 return key
@@ -379,6 +368,7 @@ class Brave(llm.Toolbox):
     def _headers(self, headers: Optional[dict[str, Any]] = None) -> dict[str, str]:
         request_headers = {
             "Accept": "application/json",
+            "Accept-Encoding": "gzip",
             "User-Agent": USER_AGENT,
             "X-Subscription-Token": self._api_key(),
         }
@@ -388,19 +378,21 @@ class Brave(llm.Toolbox):
                     request_headers[key] = str(value)
         return request_headers
 
-    def _request_json(
+    def _request(
         self,
         path: str,
-        params: Optional[dict[str, Any]] = None,
+        params: dict[str, Any],
         *,
         method: Literal["GET", "POST"] = "GET",
         headers: Optional[dict[str, Any]] = None,
-    ) -> dict[str, Any]:
-        params = params or {}
+    ) -> str:
+        """Make an HTTP request and return the decoded response text.
+
+        Raises BraveError on transport or HTTP errors.
+        """
         url = self.base_url + path
         body: Optional[bytes] = None
         request_headers = self._headers(headers)
-
         if method == "GET":
             query = urllib.parse.urlencode(_query_params(params), doseq=True)
             if query:
@@ -409,73 +401,42 @@ class Brave(llm.Toolbox):
             request_headers["Content-Type"] = "application/json"
             body = json.dumps(_clean_params(params)).encode("utf-8")
 
-        request = urllib.request.Request(
-            url,
-            data=body,
-            headers=request_headers,
-            method=method,
-        )
+        request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                text = _decode_response(response, response.read())
+                return _decode_response(response, response.read())
         except urllib.error.HTTPError as ex:
-            body_text = ex.read().decode("utf-8", errors="replace")
             raise BraveError(
                 f"brave API HTTP {ex.code}: {ex.reason}",
                 status_code=ex.code,
-                body=body_text,
+                body=ex.read().decode("utf-8", errors="replace"),
             ) from ex
         except urllib.error.URLError as ex:
             raise BraveError(f"brave API request failed: {ex.reason}") from ex
-        return _load_json(text)
 
-    def _request_stream(
+    def _call(
         self,
         path: str,
-        body: dict[str, Any],
+        params: dict[str, Any] | Callable[[], dict[str, Any]],
         *,
+        method: Literal["GET", "POST"] = "GET",
         headers: Optional[dict[str, Any]] = None,
+        stream: bool = False,
+        untrusted: bool = False,
     ) -> dict[str, Any]:
-        url = self.base_url + path
-        request_headers = self._headers(headers)
-        request_headers["Content-Type"] = "application/json"
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(_clean_params(body)).encode("utf-8"),
-            headers=request_headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                text = _decode_response(response, response.read())
-        except urllib.error.HTTPError as ex:
-            body_text = ex.read().decode("utf-8", errors="replace")
-            raise BraveError(
-                f"brave API HTTP {ex.code}: {ex.reason}",
-                status_code=ex.code,
-                body=body_text,
-            ) from ex
-        except urllib.error.URLError as ex:
-            raise BraveError(f"brave API request failed: {ex.reason}") from ex
-        return _collect_openai_stream(text)
+        """Request a brave endpoint and return a parsed dict, or an error dict.
 
-    def _safe_json(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        ``params`` may be a callable so that validation/goggles building runs inside
+        the same error-handling path. Set ``stream`` for OpenAI-style SSE responses
+        and ``untrusted`` to wrap external search text with safety markers.
+        """
         try:
-            return self._request_json(*args, **kwargs)
+            built = params() if callable(params) else params
+            text = self._request(path, built, method=method, headers=headers)
+            result = _collect_openai_stream(text) if stream else _load_json(text)
         except BraveError as ex:
             return ex.as_dict()
-
-    def _safe_search_json(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        result = self._safe_json(*args, **kwargs)
-        if "error" in result:
-            return result
-        return _mark_untrusted_search_content(result)
-
-    def _safe_stream(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        try:
-            return self._request_stream(*args, **kwargs)
-        except BraveError as ex:
-            return ex.as_dict()
+        return _mark_untrusted_search_content(result) if untrusted else result
 
     def context(
         self,
@@ -510,7 +471,7 @@ class Brave(llm.Toolbox):
         Set include_sites/exclude_sites to create simple brave Goggles rules. Freshness
         accepts pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD.
         """
-        try:
+        def params() -> dict[str, Any]:
             _validate_context_limits(
                 count=count,
                 max_tokens=max_tokens,
@@ -519,11 +480,24 @@ class Brave(llm.Toolbox):
                 max_tokens_per_url=max_tokens_per_url,
                 max_snippets_per_url=max_snippets_per_url,
             )
-            goggle_value = _make_goggles(
-                goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
-            )
-        except BraveError as ex:
-            return ex.as_dict()
+            return {
+                "q": query,
+                "country": country,
+                "search_lang": search_lang,
+                "count": count,
+                "maximum_number_of_tokens": max_tokens,
+                "maximum_number_of_urls": max_urls,
+                "maximum_number_of_snippets": max_snippets,
+                "maximum_number_of_tokens_per_url": max_tokens_per_url,
+                "maximum_number_of_snippets_per_url": max_snippets_per_url,
+                "context_threshold_mode": threshold,
+                "freshness": freshness,
+                "spellcheck": spellcheck,
+                "goggles": _make_goggles(
+                    goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
+                ),
+                "enable_local": enable_local,
+            }
         headers = {
             "X-Loc-Lat": lat,
             "X-Loc-Long": long,
@@ -532,23 +506,7 @@ class Brave(llm.Toolbox):
             "X-Loc-Country": loc_country,
             "X-Loc-Postal-Code": postal_code,
         }
-        params = {
-            "q": query,
-            "country": country,
-            "search_lang": search_lang,
-            "count": count,
-            "maximum_number_of_tokens": max_tokens,
-            "maximum_number_of_urls": max_urls,
-            "maximum_number_of_snippets": max_snippets,
-            "maximum_number_of_tokens_per_url": max_tokens_per_url,
-            "maximum_number_of_snippets_per_url": max_snippets_per_url,
-            "context_threshold_mode": threshold,
-            "freshness": freshness,
-            "spellcheck": spellcheck,
-            "goggles": goggle_value,
-            "enable_local": enable_local,
-        }
-        return self._safe_search_json("/llm/context", params, method="POST", headers=headers)
+        return self._call("/llm/context", params, method="POST", headers=headers, untrusted=True)
 
     def web(
         self,
@@ -570,25 +528,25 @@ class Brave(llm.Toolbox):
         Prefer context() when the result will be consumed directly by an LLM. Use result_filter
         for comma-separated result types such as web,news,videos,discussions,faq,infobox,locations.
         """
-        try:
-            goggle_value = _make_goggles(
-                goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
-            )
-        except BraveError as ex:
-            return ex.as_dict()
-        params = {
-            "q": query,
-            "country": country,
-            "search_lang": search_lang,
-            "count": count,
-            "offset": offset,
-            "safesearch": safesearch,
-            "freshness": freshness,
-            "result_filter": result_filter,
-            "goggles": goggle_value,
-            "extra_snippets": extra_snippets,
-        }
-        return self._safe_search_json("/web/search", params, method="POST")
+        return self._call(
+            "/web/search",
+            lambda: {
+                "q": query,
+                "country": country,
+                "search_lang": search_lang,
+                "count": count,
+                "offset": offset,
+                "safesearch": safesearch,
+                "freshness": freshness,
+                "result_filter": result_filter,
+                "goggles": _make_goggles(
+                    goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
+                ),
+                "extra_snippets": extra_snippets,
+            },
+            method="POST",
+            untrusted=True,
+        )
 
     def news(
         self,
@@ -602,21 +560,21 @@ class Brave(llm.Toolbox):
         goggles: Optional[str] = None,
     ) -> dict[str, Any]:
         """Return brave News Search results. Use freshness=pd/pw/pm/py for recent events."""
-        try:
-            goggle_value = _make_goggles(
-                goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
-            )
-        except BraveError as ex:
-            return ex.as_dict()
-        params = {
-            "q": query,
-            "country": country,
-            "search_lang": search_lang,
-            "count": count,
-            "freshness": freshness,
-            "goggles": goggle_value,
-        }
-        return self._safe_search_json("/news/search", params, method="POST")
+        return self._call(
+            "/news/search",
+            lambda: {
+                "q": query,
+                "country": country,
+                "search_lang": search_lang,
+                "count": count,
+                "freshness": freshness,
+                "goggles": _make_goggles(
+                    goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
+                ),
+            },
+            method="POST",
+            untrusted=True,
+        )
 
     def images(
         self,
@@ -636,7 +594,7 @@ class Brave(llm.Toolbox):
             "safesearch": safesearch,
             "spellcheck": spellcheck,
         }
-        return self._safe_search_json("/images/search", params)
+        return self._call("/images/search", params, untrusted=True)
 
     def videos(
         self,
@@ -656,7 +614,7 @@ class Brave(llm.Toolbox):
             "safesearch": safesearch,
             "freshness": freshness,
         }
-        return self._safe_search_json("/videos/search", params, method="POST")
+        return self._call("/videos/search", params, method="POST", untrusted=True)
 
     def places(
         self,
@@ -686,7 +644,7 @@ class Brave(llm.Toolbox):
             "search_lang": search_lang,
             "units": units,
         }
-        return self._safe_search_json("/local/place_search", params)
+        return self._call("/local/place_search", params, untrusted=True)
 
     def suggest(
         self,
@@ -704,7 +662,7 @@ class Brave(llm.Toolbox):
             "count": count,
             "rich": rich,
         }
-        return self._safe_json("/suggest/search", params)
+        return self._call("/suggest/search", params)
 
     def spellcheck(
         self,
@@ -714,7 +672,7 @@ class Brave(llm.Toolbox):
     ) -> dict[str, Any]:
         """Spell-check a search query and return brave's corrected query suggestion."""
         params = {"q": query, "lang": lang, "country": country}
-        return self._safe_json("/spellcheck/search", params)
+        return self._call("/spellcheck/search", params)
 
     def answers(
         self,
@@ -741,9 +699,7 @@ class Brave(llm.Toolbox):
             else None,
             "research_maximum_number_of_seconds": research_seconds if enable_research else None,
         }
-        if stream:
-            return self._safe_stream("/chat/completions", body)
-        return self._safe_json("/chat/completions", body, method="POST")
+        return self._call("/chat/completions", body, method="POST", stream=stream)
 
 
 @llm.hookimpl

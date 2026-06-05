@@ -32,6 +32,7 @@ build-backend = "hatchling.build"
 
 [tool.uv]
 package = true
+exclude-newer = "34 hours"
 default-groups = ["dev"]
 
 [tool.hatch.build.targets.wheel]

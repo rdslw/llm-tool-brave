@@ -1,3 +1,4 @@
+import gzip
 import json
 import urllib.parse
 
@@ -197,6 +198,43 @@ def test_get_endpoint_encodes_booleans(monkeypatch):
     assert params["q"] == ["albert"]
     assert params["rich"] == ["true"]
     assert params["count"] == ["3"]
+
+
+def test_request_sends_accept_encoding_gzip(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["headers"] = dict(request.header_items())
+        return FakeResponse({"results": []})
+
+    monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
+
+    Brave(api_key="test-key").suggest("albert")
+
+    assert seen["headers"]["Accept-encoding"] == "gzip"
+
+
+def test_gzip_encoded_response_is_decoded(monkeypatch):
+    class GzipResponse:
+        headers = {"Content-Encoding": "gzip"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return gzip.compress(json.dumps({"results": ["ok"]}).encode("utf-8"))
+
+    def fake_urlopen(request, timeout):
+        return GzipResponse()
+
+    monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
+
+    result = Brave(api_key="test-key").suggest("albert")
+
+    assert result == {"results": ["ok"]}
 
 
 def test_goggles_helpers():
