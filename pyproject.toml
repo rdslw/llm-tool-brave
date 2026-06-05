@@ -1,0 +1,41 @@
+[project]
+name = "llm-tool-brave"
+version = "0.9.0"
+description = "brave Search API tool for Simon Willison's LLM"
+readme = "README.md"
+authors = [
+    {name = "llm-tool-brave contributors"},
+    {name = "Radoslaw Stachowiak"},
+]
+requires-python = ">=3.9"
+license = "Apache-2.0"
+keywords = ["llm", "llm-plugin", "brave", "search", "web-search"]
+dependencies = [
+    "llm>=0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/rdslw/llm-tool-brave"
+Changelog = "https://github.com/rdslw/llm-tool-brave/releases"
+Issues = "https://github.com/rdslw/llm-tool-brave/issues"
+CI = "https://github.com/rdslw/llm-tool-brave/actions"
+
+[project.entry-points.llm]
+brave = "llm_tool_brave"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+default-groups = ["dev"]
+
+[tool.hatch.build.targets.wheel]
+py-modules = ["llm_tool_brave"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
