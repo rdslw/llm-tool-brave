@@ -9,6 +9,10 @@ it calls `https://api.search.brave.com/res/v1` directly with the Python standard
 
 `AGENTS.md` points at this file, so keep operational project knowledge here.
 
+## Demo
+
+![Console demo of llm-tool-brave tool usage](demo.gif)
+
 ## Quick Start
 
 ### Quick in-place usage
