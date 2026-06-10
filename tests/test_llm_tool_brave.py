@@ -55,14 +55,13 @@ def test_context_posts_expected_body_and_headers(monkeypatch):
 
     monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
 
-    result = Brave(api_key="test-key", timeout=7).context(
+    result = Brave(
+        api_key="test-key", timeout=7, max_urls=5, lat=52.23, long=21.01
+    ).context(
         "rust axum middleware",
         max_tokens=4096,
-        max_urls=5,
         threshold="strict",
         include_sites="docs.rs,github.com",
-        lat=52.23,
-        long=21.01,
     )
 
     assert result == {"grounding": {"generic": []}, "sources": {}}
@@ -96,6 +95,54 @@ def test_context_posts_sensible_default_budget(monkeypatch):
     assert seen["body"]["maximum_number_of_snippets"] == 50
     assert seen["body"]["maximum_number_of_tokens_per_url"] == 4096
     assert seen["body"]["maximum_number_of_snippets_per_url"] == 50
+
+
+def test_context_tool_schema_stays_slim(monkeypatch):
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+    tool = next(iter(Brave().tools()))
+    assert set(tool.input_schema["properties"]) == {
+        "query",
+        "count",
+        "max_tokens",
+        "threshold",
+        "freshness",
+        "include_sites",
+        "exclude_sites",
+    }
+
+
+def test_constructor_settings_flow_into_requests(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse({"grounding": {"generic": []}, "sources": {}})
+
+    monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
+
+    Brave(
+        api_key="test-key",
+        country="PL",
+        search_lang="pl",
+        spellcheck=False,
+        max_tokens_per_url=2048,
+    ).context("uv release notes")
+
+    assert seen["body"]["country"] == "PL"
+    assert seen["body"]["search_lang"] == "pl"
+    assert seen["body"]["spellcheck"] is False
+    assert seen["body"]["maximum_number_of_tokens_per_url"] == 2048
+
+
+def test_constructor_rejects_invalid_context_limits():
+    with pytest.raises(BraveError):
+        Brave(api_key="test-key", max_tokens_per_url=100)
+
+
+def test_spellcheck_setting_does_not_shadow_spellcheck_tool(monkeypatch):
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+    names = [tool.name for tool in Brave("spellcheck", spellcheck=False).tools()]
+    assert names == ["brave_spellcheck"]
 
 
 def test_context_rejects_invalid_budget_before_request(monkeypatch):
@@ -191,7 +238,7 @@ def test_get_endpoint_encodes_booleans(monkeypatch):
 
     monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
 
-    result = Brave(api_key="test-key").suggest("albert", rich=True, count=3)
+    result = Brave(api_key="test-key", rich=True).suggest("albert", count=3)
 
     assert result == {"results": []}
     parsed = urllib.parse.urlparse(seen["url"])

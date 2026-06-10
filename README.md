@@ -90,6 +90,11 @@ llm -T 'Brave("all")' 'Find coffee shops near Warsaw city center and summarize t
 Enable selected tools with `Brave("context,web,news")`; enable all with
 `Brave("all")`.
 
+Tool schemas are sent to the model with every request, so tool methods expose
+only per-query parameters. Everything user- or environment-level lives on the
+`Brave()` constructor instead (see Toolbox Settings) and never costs prompt
+tokens.
+
 ## Context Tool
 
 Use `brave_context` first for web research, docs lookup, fact-checking, and RAG.
@@ -99,24 +104,51 @@ llm -T Brave --td 'Use brave context to find Python 3.13 pathlib changes and exp
 llm -T Brave --td 'Use brave context, restricted to docs.python.org and peps.python.org, to answer: what changed in Python 3.13 typing?'
 ```
 
+Per-call parameters (the schema the model sees — deliberately short):
+
 | Parameter | brave API field | Default | Range / values |
 | --- | --- | --- | --- |
 | `query` | `q` | required | search query |
+| `count` | `count` | `20` | `1-50` |
 | `max_tokens` | `maximum_number_of_tokens` | `8192` | `1024-32768` |
-| `max_urls` | `maximum_number_of_urls` | `20` | `1-50` |
-| `max_snippets` | `maximum_number_of_snippets` | `50` | `1-100` |
-| `max_tokens_per_url` | `maximum_number_of_tokens_per_url` | `4096` | `512-8192` |
-| `max_snippets_per_url` | `maximum_number_of_snippets_per_url` | `50` | `1-100` |
 | `threshold` | `context_threshold_mode` | `balanced` | `strict`, `balanced`, `lenient`, `disabled` |
 | `freshness` | `freshness` | none | `pd`, `pw`, `pm`, `py`, or `YYYY-MM-DDtoYYYY-MM-DD` |
-| `include_sites`, `exclude_sites`, `goggles` | `goggles` | none | inline brave Goggles rules |
-| `lat`, `long`, `city`, `state`, `loc_country`, `postal_code` | location headers | none | location hints |
-
-Additional params: `country` (`US`), `search_lang` (`en`), `count` (`20`, `1-50`), `spellcheck` (`true`), `enable_local` (none).
+| `include_sites`, `exclude_sites` | `goggles` | none | comma-separated domains |
 
 Each call is bounded by `max_tokens` before returning to `llm`. Multiple searches
 consume multiple tool responses plus JSON/source metadata. Invalid documented brave
 ranges are rejected before the API request.
+
+## Toolbox Settings
+
+All other knobs are set once on the `Brave()` constructor and applied to every
+call. With the llm CLI, pass either one positional value or keyword arguments —
+the spec parser does not support mixing both:
+
+```bash
+llm -T 'Brave(tools="context,web", country="PL", search_lang="pl")' 'Find current uv release notes.'
+```
+
+| Setting | Default | Used by |
+| --- | --- | --- |
+| `country` | `US` | all tools |
+| `search_lang` | `en` | all tools (also `lang` for suggest, spellcheck) |
+| `safesearch` | `moderate` | web, images, videos |
+| `spellcheck` | `true` | context, images |
+| `goggles` | none | raw brave Goggles rules for context, web, news |
+| `enable_local` | none | context |
+| `extra_snippets` | none | web |
+| `rich` | `false` | suggest |
+| `units` | `metric` | places |
+| `max_urls` | `20` (`1-50`) | context budget |
+| `max_snippets` | `50` (`1-100`) | context budget |
+| `max_tokens_per_url` | `4096` (`512-8192`) | context budget |
+| `max_snippets_per_url` | `50` (`1-100`) | context budget |
+| `lat`, `long`, `city`, `state`, `loc_country`, `postal_code` | none | context location headers |
+| `research_iterations` | `3` | answers research mode |
+| `research_seconds` | `120` | answers research mode |
+
+Context budget settings are validated at construction time.
 
 ## Untrusted Web Content
 
@@ -142,7 +174,7 @@ response = model.chain(
 )
 print(response.text())
 
-tools = [Brave("context,web,news")]
+tools = [Brave("context,web,news", country="PL", search_lang="pl")]
 ```
 
 ## Build And Release

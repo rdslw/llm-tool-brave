@@ -183,26 +183,9 @@ def _validate_int_range(name: str, value: int, minimum: int, maximum: int) -> No
         raise BraveError(f"{name} must be from {minimum} to {maximum}.")
 
 
-def _validate_context_limits(
-    *,
-    count: int,
-    max_tokens: int,
-    max_urls: int,
-    max_snippets: int,
-    max_tokens_per_url: int,
-    max_snippets_per_url: int,
-) -> None:
-    values = {
-        "count": count,
-        "max_tokens": max_tokens,
-        "max_urls": max_urls,
-        "max_snippets": max_snippets,
-        "max_tokens_per_url": max_tokens_per_url,
-        "max_snippets_per_url": max_snippets_per_url,
-    }
-    for name, value in values.items():
-        minimum, maximum = CONTEXT_LIMITS[name]
-        _validate_int_range(name, value, minimum, maximum)
+def _validate_context_limit(name: str, value: int) -> None:
+    minimum, maximum = CONTEXT_LIMITS[name]
+    _validate_int_range(name, value, minimum, maximum)
 
 
 def _sanitize_untrusted_text(value: str) -> str:
@@ -321,8 +304,34 @@ class Brave(llm.Toolbox):
         api_key: Optional[str] = None,
         timeout: float = 30.0,
         base_url: str = BASE_URL,
+        *,
+        country: Optional[str] = "US",
+        search_lang: Optional[str] = "en",
+        safesearch: Literal["off", "moderate", "strict"] = "moderate",
+        spellcheck: bool = True,
+        goggles: Optional[str] = None,
+        enable_local: Optional[bool] = None,
+        extra_snippets: Optional[bool] = None,
+        rich: bool = False,
+        units: Literal["metric", "imperial"] = "metric",
+        max_urls: int = DEFAULT_CONTEXT_MAX_URLS,
+        max_snippets: int = DEFAULT_CONTEXT_MAX_SNIPPETS,
+        max_tokens_per_url: int = DEFAULT_CONTEXT_MAX_TOKENS_PER_URL,
+        max_snippets_per_url: int = DEFAULT_CONTEXT_MAX_SNIPPETS_PER_URL,
+        lat: Optional[float] = None,
+        long: Optional[float] = None,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        loc_country: Optional[str] = None,
+        postal_code: Optional[str] = None,
+        research_iterations: int = 3,
+        research_seconds: int = 120,
     ):
         """Create a brave toolbox.
+
+        Tool methods deliberately expose only per-query parameters, because their
+        schemas are sent to the model with every request. Everything user- or
+        environment-level is configured here instead and applied to all calls.
 
         Args:
             tools: Comma-separated tools to expose. Defaults to context only. Use
@@ -332,6 +341,21 @@ class Brave(llm.Toolbox):
                 BRAVE_SEARCH_API_KEY.
             timeout: HTTP timeout in seconds.
             base_url: Base URL for tests or compatible gateways.
+            country: Search country for all tools.
+            search_lang: Search language; also used for suggest/spellcheck lang.
+            safesearch: Filter level for web, images, and videos.
+            spellcheck: Query spellcheck for context and images.
+            goggles: Raw brave Goggles rules; conflicts with per-call
+                include_sites/exclude_sites.
+            enable_local: Local grounding results for context.
+            extra_snippets: Additional snippets in web results.
+            rich: Rich entity suggestions from suggest.
+            units: Measurement units for places.
+            max_urls, max_snippets, max_tokens_per_url, max_snippets_per_url:
+                Context budget caps, validated here against documented ranges.
+            lat, long, city, state, loc_country, postal_code: Location hints sent
+                as X-Loc-* headers with context calls.
+            research_iterations, research_seconds: Limits for answers research mode.
         """
         requested = tools or "context"
         enabled = {name.strip().lower() for name in requested.split(",") if name.strip()}
@@ -344,10 +368,42 @@ class Brave(llm.Toolbox):
                     ", ".join(sorted(unknown)), ", ".join(sorted(ALL_TOOL_NAMES))
                 )
             )
+        for name, value in (
+            ("max_urls", max_urls),
+            ("max_snippets", max_snippets),
+            ("max_tokens_per_url", max_tokens_per_url),
+            ("max_snippets_per_url", max_snippets_per_url),
+        ):
+            _validate_context_limit(name, value)
         self._enabled_tools = enabled
         self._explicit_api_key = api_key
         self.timeout = timeout
         self.base_url = base_url.rstrip("/")
+        # Settings are stored with a leading underscore so they never collide with
+        # the tool methods that tools() discovers by name (e.g. spellcheck).
+        self._country = country
+        self._search_lang = search_lang
+        self._safesearch = safesearch
+        self._spellcheck = spellcheck
+        self._goggles = goggles
+        self._enable_local = enable_local
+        self._extra_snippets = extra_snippets
+        self._rich = rich
+        self._units = units
+        self._max_urls = max_urls
+        self._max_snippets = max_snippets
+        self._max_tokens_per_url = max_tokens_per_url
+        self._max_snippets_per_url = max_snippets_per_url
+        self._research_iterations = research_iterations
+        self._research_seconds = research_seconds
+        self._location_headers = {
+            "X-Loc-Lat": lat,
+            "X-Loc-Long": long,
+            "X-Loc-City": city,
+            "X-Loc-State": state,
+            "X-Loc-Country": loc_country,
+            "X-Loc-Postal-Code": postal_code,
+        }
 
     def tools(self) -> Iterable[llm.Tool]:
         # Overridden vs. llm.Toolbox.tools() to (a) filter by self._enabled_tools and
@@ -472,87 +528,60 @@ class Brave(llm.Toolbox):
     def context(
         self,
         query: str,
-        country: Optional[str] = "US",
-        search_lang: Optional[str] = "en",
         count: int = DEFAULT_CONTEXT_COUNT,
         max_tokens: int = DEFAULT_CONTEXT_MAX_TOKENS,
-        max_urls: int = DEFAULT_CONTEXT_MAX_URLS,
-        max_snippets: int = DEFAULT_CONTEXT_MAX_SNIPPETS,
-        max_tokens_per_url: int = DEFAULT_CONTEXT_MAX_TOKENS_PER_URL,
-        max_snippets_per_url: int = DEFAULT_CONTEXT_MAX_SNIPPETS_PER_URL,
         threshold: Literal["disabled", "strict", "balanced", "lenient"] = "balanced",
         freshness: Optional[str] = None,
-        spellcheck: bool = True,
         include_sites: Optional[str] = None,
         exclude_sites: Optional[str] = None,
-        goggles: Optional[str] = None,
-        enable_local: Optional[bool] = None,
-        lat: Optional[float] = None,
-        long: Optional[float] = None,
-        city: Optional[str] = None,
-        state: Optional[str] = None,
-        loc_country: Optional[str] = None,
-        postal_code: Optional[str] = None,
     ) -> dict[str, Any]:
         """Return brave LLM Context: pre-extracted, token-budgeted web content for grounding.
 
         Use this first for web research, documentation lookup, fact-checking, and RAG-style
-        answers. Each call defaults to an 8192-token total context budget over up to
-        20 URLs, with per-URL caps so one result cannot consume the whole response.
-        Set include_sites/exclude_sites to create simple brave Goggles rules. Freshness
+        answers. Each call defaults to an 8192-token total context budget with per-URL
+        caps. include_sites/exclude_sites take comma-separated domains. Freshness
         accepts pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD.
         """
         def params() -> dict[str, Any]:
-            _validate_context_limits(
-                count=count,
-                max_tokens=max_tokens,
-                max_urls=max_urls,
-                max_snippets=max_snippets,
-                max_tokens_per_url=max_tokens_per_url,
-                max_snippets_per_url=max_snippets_per_url,
-            )
+            _validate_context_limit("count", count)
+            _validate_context_limit("max_tokens", max_tokens)
             return {
                 "q": query,
-                "country": country,
-                "search_lang": search_lang,
+                "country": self._country,
+                "search_lang": self._search_lang,
                 "count": count,
                 "maximum_number_of_tokens": max_tokens,
-                "maximum_number_of_urls": max_urls,
-                "maximum_number_of_snippets": max_snippets,
-                "maximum_number_of_tokens_per_url": max_tokens_per_url,
-                "maximum_number_of_snippets_per_url": max_snippets_per_url,
+                "maximum_number_of_urls": self._max_urls,
+                "maximum_number_of_snippets": self._max_snippets,
+                "maximum_number_of_tokens_per_url": self._max_tokens_per_url,
+                "maximum_number_of_snippets_per_url": self._max_snippets_per_url,
                 "context_threshold_mode": threshold,
                 "freshness": freshness,
-                "spellcheck": spellcheck,
+                "spellcheck": self._spellcheck,
                 "goggles": _make_goggles(
-                    goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
+                    goggles=self._goggles,
+                    include_sites=include_sites,
+                    exclude_sites=exclude_sites,
                 ),
-                "enable_local": enable_local,
+                "enable_local": self._enable_local,
             }
-        headers = {
-            "X-Loc-Lat": lat,
-            "X-Loc-Long": long,
-            "X-Loc-City": city,
-            "X-Loc-State": state,
-            "X-Loc-Country": loc_country,
-            "X-Loc-Postal-Code": postal_code,
-        }
-        return self._call("/llm/context", params, method="POST", headers=headers, untrusted=True)
+        return self._call(
+            "/llm/context",
+            params,
+            method="POST",
+            headers=self._location_headers,
+            untrusted=True,
+        )
 
     def web(
         self,
         query: str,
-        country: Optional[str] = "US",
-        search_lang: Optional[str] = "en",
         count: int = 10,
         offset: int = 0,
-        safesearch: Literal["off", "moderate", "strict"] = "moderate",
         freshness: Optional[str] = None,
         result_filter: Optional[str] = None,
         include_sites: Optional[str] = None,
         exclude_sites: Optional[str] = None,
-        goggles: Optional[str] = None,
-        extra_snippets: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Return traditional brave Web Search results with URLs, snippets, and rich result types.
 
@@ -563,17 +592,19 @@ class Brave(llm.Toolbox):
             "/web/search",
             lambda: {
                 "q": query,
-                "country": country,
-                "search_lang": search_lang,
+                "country": self._country,
+                "search_lang": self._search_lang,
                 "count": count,
                 "offset": offset,
-                "safesearch": safesearch,
+                "safesearch": self._safesearch,
                 "freshness": freshness,
                 "result_filter": result_filter,
                 "goggles": _make_goggles(
-                    goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
+                    goggles=self._goggles,
+                    include_sites=include_sites,
+                    exclude_sites=exclude_sites,
                 ),
-                "extra_snippets": extra_snippets,
+                "extra_snippets": self._extra_snippets,
             },
             method="POST",
             untrusted=True,
@@ -582,67 +613,55 @@ class Brave(llm.Toolbox):
     def news(
         self,
         query: str,
-        country: Optional[str] = "US",
-        search_lang: Optional[str] = "en",
         count: int = 10,
         freshness: Optional[str] = None,
         include_sites: Optional[str] = None,
         exclude_sites: Optional[str] = None,
-        goggles: Optional[str] = None,
     ) -> dict[str, Any]:
         """Return brave News Search results. Use freshness=pd/pw/pm/py for recent events."""
         return self._call(
             "/news/search",
             lambda: {
                 "q": query,
-                "country": country,
-                "search_lang": search_lang,
+                "country": self._country,
+                "search_lang": self._search_lang,
                 "count": count,
                 "freshness": freshness,
                 "goggles": _make_goggles(
-                    goggles=goggles, include_sites=include_sites, exclude_sites=exclude_sites
+                    goggles=self._goggles,
+                    include_sites=include_sites,
+                    exclude_sites=exclude_sites,
                 ),
             },
             method="POST",
             untrusted=True,
         )
 
-    def images(
-        self,
-        query: str,
-        country: Optional[str] = "US",
-        search_lang: Optional[str] = "en",
-        count: int = 20,
-        safesearch: Literal["off", "moderate", "strict"] = "moderate",
-        spellcheck: bool = True,
-    ) -> dict[str, Any]:
+    def images(self, query: str, count: int = 20) -> dict[str, Any]:
         """Return brave Image Search results with image URLs and thumbnail metadata."""
         params = {
             "q": query,
-            "country": country,
-            "search_lang": search_lang,
+            "country": self._country,
+            "search_lang": self._search_lang,
             "count": count,
-            "safesearch": safesearch,
-            "spellcheck": spellcheck,
+            "safesearch": self._safesearch,
+            "spellcheck": self._spellcheck,
         }
         return self._call("/images/search", params, untrusted=True)
 
     def videos(
         self,
         query: str,
-        country: Optional[str] = "US",
-        search_lang: Optional[str] = "en",
         count: int = 10,
-        safesearch: Literal["off", "moderate", "strict"] = "moderate",
         freshness: Optional[str] = None,
     ) -> dict[str, Any]:
         """Return brave Video Search results with URLs, thumbnails, duration, and creator metadata."""
         params = {
             "q": query,
-            "country": country,
-            "search_lang": search_lang,
+            "country": self._country,
+            "search_lang": self._search_lang,
             "count": count,
-            "safesearch": safesearch,
+            "safesearch": self._safesearch,
             "freshness": freshness,
         }
         return self._call("/videos/search", params, method="POST", untrusted=True)
@@ -655,9 +674,6 @@ class Brave(llm.Toolbox):
         location: Optional[str] = None,
         radius: Optional[float] = None,
         count: int = 20,
-        country: Optional[str] = "US",
-        search_lang: Optional[str] = "en",
-        units: Literal["metric", "imperial"] = "metric",
     ) -> dict[str, Any]:
         """Search points of interest such as businesses, landmarks, cities, and addresses.
 
@@ -671,38 +687,26 @@ class Brave(llm.Toolbox):
             "location": location,
             "radius": radius,
             "count": count,
-            "country": country,
-            "search_lang": search_lang,
-            "units": units,
+            "country": self._country,
+            "search_lang": self._search_lang,
+            "units": self._units,
         }
         return self._call("/local/place_search", params, untrusted=True)
 
-    def suggest(
-        self,
-        query: str,
-        country: Optional[str] = "US",
-        lang: Optional[str] = "en",
-        count: int = 5,
-        rich: bool = False,
-    ) -> dict[str, Any]:
+    def suggest(self, query: str, count: int = 5) -> dict[str, Any]:
         """Return brave autosuggest completions for a partial or ambiguous search query."""
         params = {
             "q": query,
-            "country": country,
-            "lang": lang,
+            "country": self._country,
+            "lang": self._search_lang,
             "count": count,
-            "rich": rich,
+            "rich": self._rich,
         }
         return self._call("/suggest/search", params)
 
-    def spellcheck(
-        self,
-        query: str,
-        lang: Optional[str] = "en",
-        country: Optional[str] = "US",
-    ) -> dict[str, Any]:
+    def spellcheck(self, query: str) -> dict[str, Any]:
         """Spell-check a search query and return brave's corrected query suggestion."""
-        params = {"q": query, "lang": lang, "country": country}
+        params = {"q": query, "lang": self._search_lang, "country": self._country}
         return self._call("/spellcheck/search", params)
 
     def answers(
@@ -710,8 +714,6 @@ class Brave(llm.Toolbox):
         query: str,
         enable_citations: bool = False,
         enable_research: bool = False,
-        research_iterations: int = 3,
-        research_seconds: int = 120,
     ) -> dict[str, Any]:
         """Return brave AI Grounding answer for a query using the Answers API.
 
@@ -725,13 +727,17 @@ class Brave(llm.Toolbox):
             "stream": stream,
             "enable_citations": enable_citations if enable_citations else None,
             "enable_research": enable_research if enable_research else None,
-            "research_maximum_number_of_iterations": research_iterations
+            "research_maximum_number_of_iterations": self._research_iterations
             if enable_research
             else None,
-            "research_maximum_number_of_seconds": research_seconds if enable_research else None,
+            "research_maximum_number_of_seconds": self._research_seconds
+            if enable_research
+            else None,
         }
         # Research mode may legitimately run longer than the default socket timeout.
-        timeout = max(self.timeout, research_seconds + 10.0) if enable_research else None
+        timeout = (
+            max(self.timeout, self._research_seconds + 10.0) if enable_research else None
+        )
         return self._call(
             "/chat/completions",
             body,

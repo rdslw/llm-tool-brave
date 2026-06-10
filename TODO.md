@@ -1,9 +1,5 @@
 ## List of TODO tasks for llm-tool-brave
 
-* Analyze and enhance tool snippets/description
-  - is tools.description good for 'brave-context' ? check `tmp/conversation_dump.md` and observe that '### Tools' section (subsection of '## Prompt') has quite long arguments json part. Is it really worthwile to have it full at every prompt/llm call provided with our tool???
-  - do we need to provide ALL properties in input schema? it uses a lot of tokens
-
 * Based on llm-tool-brave create llm-tool-bx which will simply use 'bx' CLI tool instead of http api
   - plan to be defined...
 
