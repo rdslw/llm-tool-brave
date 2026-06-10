@@ -120,10 +120,10 @@ ranges are rejected before the API request.
 
 ## Untrusted Web Content
 
-Search result text is external and untrusted. The plugin wraps snippets and
-descriptions with compact `BRAVE_UNTRUSTED_CONTENT` markers and adds one
-`security_notice` field. URLs, titles, source metadata, and structured fields stay
-intact.
+Search result text is external and untrusted. The plugin wraps snippets,
+descriptions, and brave-generated answer content with compact
+`BRAVE_UNTRUSTED_CONTENT` markers and adds one `security_notice` field. URLs,
+titles, source metadata, and structured fields stay intact.
 
 This is a prompt-level guardrail, not a security boundary. Be careful combining
 search tools with tools that can read private data, execute commands, send messages,

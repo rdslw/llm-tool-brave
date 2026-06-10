@@ -7,12 +7,18 @@ import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
+from importlib import metadata
 from typing import Any, Callable, Iterable, Literal, Optional
 
 import llm
 
+try:
+    __version__ = metadata.version("llm-tool-brave")
+except metadata.PackageNotFoundError:
+    __version__ = "0.0.dev0"
+
 BASE_URL = "https://api.search.brave.com/res/v1"
-USER_AGENT = "llm-tool-brave/0.1"
+USER_AGENT = f"llm-tool-brave/{__version__}"
 
 DEFAULT_CONTEXT_COUNT = 20
 DEFAULT_CONTEXT_MAX_TOKENS = 8192
@@ -40,7 +46,7 @@ UNTRUSTED_CONTENT_SOURCE = "brave_search"
 MARKER_SANITIZED = "[BRAVE_UNTRUSTED_MARKER_SANITIZED]"
 SPECIAL_TOKEN_SANITIZED = "[LLM_SPECIAL_TOKEN_SANITIZED]"
 
-UNTRUSTED_TEXT_KEYS = {"description", "snippet"}
+UNTRUSTED_TEXT_KEYS = {"description", "snippet", "content"}
 UNTRUSTED_TEXT_LIST_KEYS = {"snippets", "extra_snippets"}
 
 LLM_SPECIAL_TOKEN_LITERALS = (
@@ -256,10 +262,19 @@ def _mark_untrusted_search_content(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _collect_openai_stream(text: str) -> dict[str, Any]:
-    """Collect OpenAI-compatible JSON/SSE stream chunks into one response."""
-    events: list[dict[str, Any]] = []
+    """Collect OpenAI-compatible JSON/SSE stream chunks into one compact response.
+
+    Returns only the joined content plus any citations, instead of replaying every
+    stream chunk, so the tool result stays token-cheap.
+    """
     content: list[str] = []
+    citations: list[Any] = []
     unparsed: list[str] = []
+
+    def collect_citations(container: dict[str, Any]) -> None:
+        found = container.get("citations")
+        if isinstance(found, list):
+            citations.extend(found)
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -274,18 +289,22 @@ def _collect_openai_stream(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             unparsed.append(raw_line)
             continue
-        if isinstance(event, dict):
-            events.append(event)
-            for choice in event.get("choices", []) or []:
-                delta = choice.get("delta") or {}
-                message = choice.get("message") or {}
-                text_part = delta.get("content") or message.get("content")
-                if text_part:
-                    content.append(text_part)
-        else:
+        if not isinstance(event, dict):
             unparsed.append(raw_line)
+            continue
+        collect_citations(event)
+        for choice in event.get("choices", []) or []:
+            delta = choice.get("delta") or {}
+            message = choice.get("message") or {}
+            text_part = delta.get("content") or message.get("content")
+            if text_part:
+                content.append(text_part)
+            collect_citations(delta)
+            collect_citations(message)
 
-    result: dict[str, Any] = {"content": "".join(content), "events": events}
+    result: dict[str, Any] = {"content": "".join(content)}
+    if citations:
+        result["citations"] = citations
     if unparsed:
         result["unparsed_lines"] = unparsed
     return result
@@ -333,8 +352,10 @@ class Brave(llm.Toolbox):
     def tools(self) -> Iterable[llm.Tool]:
         # Overridden vs. llm.Toolbox.tools() to (a) filter by self._enabled_tools and
         # (b) use a lowercase "brave_" prefix instead of the default "Brave_".
+        # _blocked and _extra_tools are llm.Toolbox internals; tolerate their absence.
+        blocked = getattr(self, "_blocked", ())
         for name in dir(self):
-            if name.startswith("_") or name in self._blocked:
+            if name.startswith("_") or name in blocked:
                 continue
             attr = getattr(self, name)
             if callable(attr) and name in self._enabled_tools:
@@ -342,13 +363,14 @@ class Brave(llm.Toolbox):
                 tool.plugin = getattr(self, "plugin", None)
                 yield tool
         # Preserve the base class extension point for add_tool().
-        yield from self._extra_tools
+        yield from getattr(self, "_extra_tools", ())
 
     @classmethod
     def method_tools(cls) -> list[llm.Tool]:
         tools: list[llm.Tool] = []
+        blocked = getattr(cls, "_blocked", ())
         for name in dir(cls):
-            if name.startswith("_") or name in cls._blocked:
+            if name.startswith("_") or name in blocked:
                 continue
             method = getattr(cls, name)
             if callable(method):
@@ -356,11 +378,15 @@ class Brave(llm.Toolbox):
         return tools
 
     def _api_key(self) -> str:
-        # Try the most common llm key aliases first, then the documented env var.
+        # Documented lookup order: explicit key, alias brave, alias brave-search,
+        # then the env var. Checking env per alias call would let it shadow brave-search.
         for alias in ("brave", "brave-search"):
-            key = llm.get_key(input=self._explicit_api_key, alias=alias, env="BRAVE_SEARCH_API_KEY")
+            key = llm.get_key(input=self._explicit_api_key, alias=alias)
             if key:
                 return key
+        key = llm.get_key(env="BRAVE_SEARCH_API_KEY")
+        if key:
+            return key
         raise BraveError(
             "Missing brave Search API key. Run `llm keys set brave` or set BRAVE_SEARCH_API_KEY."
         )
@@ -385,6 +411,7 @@ class Brave(llm.Toolbox):
         *,
         method: Literal["GET", "POST"] = "GET",
         headers: Optional[dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> str:
         """Make an HTTP request and return the decoded response text.
 
@@ -403,13 +430,16 @@ class Brave(llm.Toolbox):
 
         request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout if timeout is None else timeout
+            ) as response:
                 return _decode_response(response, response.read())
         except urllib.error.HTTPError as ex:
+            # Error bodies honor Accept-Encoding too, so decode like a success body.
             raise BraveError(
                 f"brave API HTTP {ex.code}: {ex.reason}",
                 status_code=ex.code,
-                body=ex.read().decode("utf-8", errors="replace"),
+                body=_decode_response(ex, ex.read()),
             ) from ex
         except urllib.error.URLError as ex:
             raise BraveError(f"brave API request failed: {ex.reason}") from ex
@@ -423,6 +453,7 @@ class Brave(llm.Toolbox):
         headers: Optional[dict[str, Any]] = None,
         stream: bool = False,
         untrusted: bool = False,
+        timeout: Optional[float] = None,
     ) -> dict[str, Any]:
         """Request a brave endpoint and return a parsed dict, or an error dict.
 
@@ -432,7 +463,7 @@ class Brave(llm.Toolbox):
         """
         try:
             built = params() if callable(params) else params
-            text = self._request(path, built, method=method, headers=headers)
+            text = self._request(path, built, method=method, headers=headers, timeout=timeout)
             result = _collect_openai_stream(text) if stream else _load_json(text)
         except BraveError as ex:
             return ex.as_dict()
@@ -699,7 +730,16 @@ class Brave(llm.Toolbox):
             else None,
             "research_maximum_number_of_seconds": research_seconds if enable_research else None,
         }
-        return self._call("/chat/completions", body, method="POST", stream=stream)
+        # Research mode may legitimately run longer than the default socket timeout.
+        timeout = max(self.timeout, research_seconds + 10.0) if enable_research else None
+        return self._call(
+            "/chat/completions",
+            body,
+            method="POST",
+            stream=stream,
+            untrusted=True,
+            timeout=timeout,
+        )
 
 
 @llm.hookimpl

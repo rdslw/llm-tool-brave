@@ -1,5 +1,7 @@
 import gzip
+import io
 import json
+import urllib.error
 import urllib.parse
 
 import pytest
@@ -253,7 +255,8 @@ def test_streaming_answers_are_collected(monkeypatch):
         def read(self):
             return (
                 'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
-                'data: {"choices":[{"delta":{"content":" world"}}]}\n\n'
+                'data: {"choices":[{"delta":{"content":" world"}}],'
+                '"citations":[{"url":"https://example.com"}]}\n\n'
                 "data: [DONE]\n\n"
             ).encode("utf-8")
 
@@ -264,5 +267,97 @@ def test_streaming_answers_are_collected(monkeypatch):
 
     result = Brave("answers", api_key="test-key").answers("say hello", enable_citations=True)
 
-    assert result["content"] == "Hello world"
-    assert len(result["events"]) == 2
+    assert "Hello world" in result["content"]
+    assert result["content"].startswith("<<<BRAVE_UNTRUSTED_CONTENT")
+    assert result["citations"] == [{"url": "https://example.com"}]
+    assert result["security_notice"] == llm_tool_brave.UNTRUSTED_CONTENT_NOTICE
+    assert "events" not in result
+
+
+def test_non_streaming_answers_wrap_content_and_keep_timeout(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["body"] = json.loads(request.data.decode("utf-8"))
+        seen["timeout"] = timeout
+        return FakeResponse({"choices": [{"message": {"content": "Paris is the capital."}}]})
+
+    monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
+
+    result = Brave("answers", api_key="test-key").answers("capital of France")
+
+    assert seen["body"]["stream"] is False
+    assert seen["timeout"] == 30.0
+    content = result["choices"][0]["message"]["content"]
+    assert content.startswith("<<<BRAVE_UNTRUSTED_CONTENT")
+    assert "Paris is the capital." in content
+    assert result["security_notice"] == llm_tool_brave.UNTRUSTED_CONTENT_NOTICE
+
+
+def test_research_answers_extend_timeout_beyond_research_seconds(monkeypatch):
+    seen = {}
+
+    def fake_urlopen(request, timeout):
+        seen["timeout"] = timeout
+        return FakeResponse({})
+
+    monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
+
+    Brave("answers", api_key="test-key").answers("deep dive", enable_research=True)
+
+    assert seen["timeout"] == 130.0
+
+
+def test_http_error_returns_structured_error(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            429,
+            "Too Many Requests",
+            {},
+            io.BytesIO(b'{"message":"rate limited"}'),
+        )
+
+    monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
+
+    result = Brave(api_key="test-key").context("python pathlib")
+
+    assert result == {
+        "error": "brave API HTTP 429: Too Many Requests",
+        "status_code": 429,
+        "body": {"message": "rate limited"},
+    }
+
+
+def test_gzipped_http_error_body_is_decoded(monkeypatch):
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            429,
+            "Too Many Requests",
+            {"Content-Encoding": "gzip"},
+            io.BytesIO(gzip.compress(b'{"message":"slow down"}')),
+        )
+
+    monkeypatch.setattr(llm_tool_brave.urllib.request, "urlopen", fake_urlopen)
+
+    result = Brave(api_key="test-key").context("python pathlib")
+
+    assert result["body"] == {"message": "slow down"}
+
+
+def test_unknown_tool_names_are_rejected():
+    with pytest.raises(ValueError) as excinfo:
+        Brave("context,bogus")
+    assert "bogus" in str(excinfo.value)
+
+
+def test_api_key_env_fallback_and_missing_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("LLM_USER_PATH", str(tmp_path))
+
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "env-key")
+    assert Brave()._api_key() == "env-key"
+
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY")
+    with pytest.raises(BraveError):
+        Brave()._api_key()
