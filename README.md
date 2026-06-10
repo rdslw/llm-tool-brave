@@ -155,10 +155,15 @@ Publishing uses `.github/workflows/publish.yml`: full Python test matrix, `uv bu
 then PyPI Trusted Publishing. Before the first release, configure PyPI for repository
 `rdslw/llm-tool-brave`, workflow `publish.yml`, environment `pypi`.
 
+`uv.lock` is intentionally not committed: this is a library, so the lockfile never
+ships to users, and unlocked CI resolves fresh against `llm>=0.27` — an early
+warning when a new `llm` release breaks the plugin. `[tool.uv] exclude-newer`
+keeps brand-new package releases out of every resolution as a supply-chain guard.
+
 Release:
 
 1. Update `version` in `pyproject.toml`. PyPI versions are immutable.
-2. Run `uv sync --locked --all-groups`, `uv run pytest`, and `uv build`.
+2. Run `uv sync --all-groups`, `uv run pytest`, and `uv build`.
 3. Commit, tag, push, then create a GitHub release from that tag.
 
 ```bash
