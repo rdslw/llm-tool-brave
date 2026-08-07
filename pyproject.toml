@@ -1,6 +1,6 @@
 [project]
 name = "llm-tool-brave"
-version = "0.9.1"
+version = "0.10.0"
 description = "brave Search API tool for Simon Willison's LLM"
 readme = "README.md"
 authors = [
