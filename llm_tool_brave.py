@@ -196,6 +196,10 @@ def _sanitize_untrusted_text(value: str) -> str:
 
 
 def _wrap_untrusted_text(value: str) -> str:
+    # TODO(llm>=0.32): tool methods can take a reserved llm_tool_call parameter
+    # (never shown to the model) carrying the unique tool_call_id. Threading it
+    # here as the marker id would let every wrapped snippet in the logs trace
+    # back to the exact tool call that fetched it, instead of a random hex id.
     marker_id = secrets.token_hex(8)
     sanitized = _sanitize_untrusted_text(value)
     return (
@@ -294,9 +298,15 @@ def _collect_openai_stream(text: str) -> dict[str, Any]:
 
 
 class Brave(llm.Toolbox):
-    """brave Search API tools inspired by the bx CLI."""
+    """brave Search API tools inspired by the bx CLI.
 
-    name = "brave Search API tools"
+    Exposes brave Search endpoints as llm tools: context (default), web, news,
+    images, videos, places, suggest, spellcheck, answers. Select tools with
+    Brave("context,web") or Brave("all"). User- and environment-level settings
+    (country, search_lang, safesearch, context budgets, location, ...) are
+    constructor arguments so tool schemas stay slim. The API key is resolved
+    from llm keys (alias brave or brave-search) or BRAVE_SEARCH_API_KEY.
+    """
 
     def __init__(
         self,
@@ -404,10 +414,20 @@ class Brave(llm.Toolbox):
             "X-Loc-Country": loc_country,
             "X-Loc-Postal-Code": postal_code,
         }
+        # llm.Toolbox records constructor arguments in self._config before this
+        # __init__ runs, and llm 0.32+ persists that config to the logs database
+        # and replays it to rebuild the toolbox for continued conversations
+        # (llm -c). Never let a key travel that path: continued conversations
+        # re-resolve it through the _api_key() lookup chain instead.
+        config = getattr(self, "_config", None)
+        if isinstance(config, dict) and config.get("api_key"):
+            config["api_key"] = None
 
     def tools(self) -> Iterable[llm.Tool]:
-        # Overridden vs. llm.Toolbox.tools() to (a) filter by self._enabled_tools and
-        # (b) use a lowercase "brave_" prefix instead of the default "Brave_".
+        # Overridden vs. llm.Toolbox.tools() only to filter by self._enabled_tools.
+        # Tool names must keep the default "Brave_" class-name prefix: llm 0.32
+        # derives the toolbox name from tool_name.split("_")[0] when it logs and
+        # later rebuilds this toolbox for continued conversations (llm -c).
         # _blocked and _extra_tools are llm.Toolbox internals; tolerate their absence.
         blocked = getattr(self, "_blocked", ())
         for name in dir(self):
@@ -415,7 +435,7 @@ class Brave(llm.Toolbox):
                 continue
             attr = getattr(self, name)
             if callable(attr) and name in self._enabled_tools:
-                tool = llm.Tool.function(attr, name=f"brave_{name}")
+                tool = llm.Tool.function(attr, name=f"Brave_{name}")
                 tool.plugin = getattr(self, "plugin", None)
                 yield tool
         # Preserve the base class extension point for add_tool().
@@ -430,7 +450,7 @@ class Brave(llm.Toolbox):
                 continue
             method = getattr(cls, name)
             if callable(method):
-                tools.append(llm.Tool.function(method, name=f"brave_{name}"))
+                tools.append(llm.Tool.function(method, name=f"Brave_{name}"))
         return tools
 
     def _api_key(self) -> str:
@@ -522,6 +542,8 @@ class Brave(llm.Toolbox):
             text = self._request(path, built, method=method, headers=headers, timeout=timeout)
             result = _collect_openai_stream(text) if stream else _load_json(text)
         except BraveError as ex:
+            # TODO(llm>=0.32): tag error dicts with llm_tool_call.tool_call_id so
+            # failures stay correlatable when a turn runs several brave calls.
             return ex.as_dict()
         return _mark_untrusted_search_content(result) if untrusted else result
 

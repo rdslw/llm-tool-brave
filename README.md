@@ -21,7 +21,7 @@ it calls `https://api.search.brave.com/res/v1` directly with the Python standard
 uv sync                                     # see explanation below
 uv run pytest                               # optional
 uv run llm plugins                          # shall show llm-tool-brave
-uv run llm tools list | grep -E '^ +brave'
+uv run llm tools list | grep -i brave
 ```
 
 `uv sync` installs this package into `.venv` because `[tool.uv] package = true`.
@@ -31,7 +31,7 @@ Runtime-only local check:
 
 ```bash
 uv run --no-dev llm plugins
-uv run --no-dev llm tools list | grep brave
+uv run --no-dev llm tools list | grep -i brave
 ```
 
 ### Install into a global `llm` environment from local dir:
@@ -57,8 +57,15 @@ llm keys set brave
 
 Lookup order: stored key alias `brave`, `brave-search`, then env BRAVE_SEARCH_API_KEY.
 
-Avoid raw API keys in toolbox constructor arguments. LLM may log those; `llm keys`
-or `BRAVE_SEARCH_API_KEY` keeps secrets out of prompts and tool-call logs.
+Avoid raw API keys in toolbox constructor arguments such as
+`-T 'Brave(api_key="...")'`. This is not the standard llm plugin approach
+(key-requiring plugins resolve keys via `llm keys` or env vars), and llm 0.32+
+persists toolbox constructor arguments to the logs database and replays them
+when continuing conversations with `llm -c`. As a safety net this plugin scrubs
+`api_key` from that persisted config, which means a conversation started with a
+raw constructor key can only be continued if the key is also available via
+`llm keys` or BRAVE_SEARCH_API_KEY. The `api_key` argument remains supported
+for the Python API and tests.
 
 ## Usage
 
@@ -90,6 +97,11 @@ llm -T 'Brave("all")' 'Find coffee shops near Warsaw city center and summarize t
 Enable selected tools with `Brave("context,web,news")`; enable all with
 `Brave("all")`.
 
+Model-visible tool names carry the toolbox class prefix: `Brave_context`,
+`Brave_web`, and so on. The prefix must match the registered class name so that
+llm 0.32+ can map logged tool calls back to this toolbox and continue
+conversations with `llm -c` without repeating the `-T` option.
+
 Tool schemas are sent to the model with every request, so tool methods expose
 only per-query parameters. Everything user- or environment-level lives on the
 `Brave()` constructor instead (see Toolbox Settings) and never costs prompt
@@ -97,7 +109,7 @@ tokens.
 
 ## Context Tool
 
-Use `brave_context` first for web research, docs lookup, fact-checking, and RAG.
+Use `Brave_context` first for web research, docs lookup, fact-checking, and RAG.
 
 ```bash
 llm -T Brave --td 'Use brave context to find Python 3.13 pathlib changes and explain the practical impact.'

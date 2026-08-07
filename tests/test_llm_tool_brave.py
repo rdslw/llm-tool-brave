@@ -28,19 +28,22 @@ class FakeResponse:
 def test_default_toolbox_exposes_context_only(monkeypatch):
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
     names = [tool.name for tool in Brave().tools()]
-    assert names == ["brave_context"]
+    assert names == ["Brave_context"]
 
 
 def test_toolbox_can_expose_selected_tools(monkeypatch):
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
     names = sorted(tool.name for tool in Brave("context,web,news").tools())
-    assert names == ["brave_context", "brave_news", "brave_web"]
+    assert names == ["Brave_context", "Brave_news", "Brave_web"]
 
 
-def test_class_method_tools_use_lowercase_prefix():
+def test_class_method_tools_use_class_name_prefix():
+    # llm 0.32 maps tools back to their toolbox via tool_name.split("_")[0]
+    # when continuing conversations, so the prefix must match the registered
+    # class name "Brave".
     names = {tool.name for tool in Brave.method_tools()}
-    assert "brave_context" in names
-    assert "Brave_context" not in names
+    assert "Brave_context" in names
+    assert "brave_context" not in names
 
 
 def test_context_posts_expected_body_and_headers(monkeypatch):
@@ -142,7 +145,19 @@ def test_constructor_rejects_invalid_context_limits():
 def test_spellcheck_setting_does_not_shadow_spellcheck_tool(monkeypatch):
     monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
     names = [tool.name for tool in Brave("spellcheck", spellcheck=False).tools()]
-    assert names == ["brave_spellcheck"]
+    assert names == ["Brave_spellcheck"]
+
+
+def test_api_key_is_scrubbed_from_persisted_toolbox_config(monkeypatch):
+    # llm.Toolbox captures constructor arguments in _config; llm 0.32+ writes
+    # that to the logs database and replays it on `llm -c`. Raw keys must not
+    # survive into it, while other settings must, so continuation still works.
+    toolbox = Brave("context,web", api_key="BSA-secret", country="PL")
+    assert toolbox._config["api_key"] is None
+    assert toolbox._config["tools"] == "context,web"
+    assert toolbox._config["country"] == "PL"
+    # The key itself still works for requests via the explicit-key path.
+    assert toolbox._explicit_api_key == "BSA-secret"
 
 
 def test_context_rejects_invalid_budget_before_request(monkeypatch):
