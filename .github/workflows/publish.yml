@@ -29,8 +29,10 @@ jobs:
         with:
           enable-cache: true
 
+      # --no-editable: test the built wheel, not the source tree, so
+      # packaging bugs (file missing from the wheel) surface before publish.
       - name: Install dependencies
-        run: uv sync --all-groups
+        run: uv sync --all-groups --no-editable
 
       - name: Run tests
         run: uv run pytest

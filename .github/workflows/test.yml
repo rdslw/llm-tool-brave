@@ -1,6 +1,18 @@
 name: Test
 
-on: [push, pull_request]
+# Tags are deliberately not a trigger: release tags point at commits already
+# tested on master, and publish.yml re-tests the tagged code in its own test
+# job before publishing. PR branches are covered by the pull_request event.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  # GitHub auto-disables schedules after ~60 days without repo commits;
+  # check state / re-enable (both idempotent):
+  #   gh workflow list --all      # State column: disabled_inactivity
+  #   gh workflow enable test.yml
+  schedule:
+    - cron: "0 6 2 * *"  # monthly: catch new llm releases breaking us
 
 permissions:
   contents: read
@@ -9,6 +21,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      # default fail-fast cancels remaining matrix jobs on first failure —
+      # we want the full answer to "which Python versions break?"
+      fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
 
